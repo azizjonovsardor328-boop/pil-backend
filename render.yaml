@@ -1,0 +1,13 @@
+services:
+  - type: web
+    name: pil-backend
+    runtime: python
+    buildCommand: pip install -r requirements.txt
+    startCommand: uvicorn main:app --host 0.0.0.0 --port $PORT
+    envVars:
+      - key: PYTHON_VERSION
+        value: "3.12"
+      - key: PIL_RP_ID
+        value: frontend-cb7owtw7f-sardors-projects-576ea55f.vercel.app
+      - key: PIL_RP_ORIGIN
+        value: https://frontend-cb7owtw7f-sardors-projects-576ea55f.vercel.app
