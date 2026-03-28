@@ -10,8 +10,9 @@ import base64
 import hashlib
 from typing import Dict, Any
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel
+from urllib.parse import urlparse
 
 router = APIRouter(prefix="/webauthn", tags=["WebAuthn"])
 
@@ -49,11 +50,14 @@ class AuthFinishRequest(BaseModel):
 # ─── Registration ───
 
 @router.post("/register/start")
-async def register_start(req: RegisterStartRequest):
+async def register_start(req: RegisterStartRequest, request: Request):
     """
     Step 1: Server generates a challenge for the client.
     The browser will use navigator.credentials.create() with this data.
     """
+    origin = request.headers.get("origin")
+    current_rp_id = urlparse(origin).hostname if origin else RP_ID
+
     challenge = secrets.token_bytes(32)
     challenge_b64 = base64.urlsafe_b64encode(challenge).decode("ascii").rstrip("=")
 
@@ -67,7 +71,7 @@ async def register_start(req: RegisterStartRequest):
         "challenge": challenge_b64,
         "rp": {
             "name": RP_NAME,
-            "id": RP_ID,
+            "id": current_rp_id,
         },
         "user": {
             "id": user_id_b64,
@@ -120,11 +124,14 @@ async def register_finish(req: RegisterFinishRequest):
 # ─── Authentication ───
 
 @router.post("/auth/start")
-async def auth_start(req: AuthStartRequest):
+async def auth_start(req: AuthStartRequest, request: Request):
     """
     Step 1: Server generates a challenge for authentication.
     The browser will use navigator.credentials.get() with this data.
     """
+    origin = request.headers.get("origin")
+    current_rp_id = urlparse(origin).hostname if origin else RP_ID
+
     cred = CREDENTIAL_STORE.get(f"cred:{req.username}")
     if not cred:
         raise HTTPException(status_code=404, detail="No credential found for this user")
@@ -136,7 +143,7 @@ async def auth_start(req: AuthStartRequest):
 
     options = {
         "challenge": challenge_b64,
-        "rpId": RP_ID,
+        "rpId": current_rp_id,
         "allowCredentials": [
             {
                 "type": "public-key",
