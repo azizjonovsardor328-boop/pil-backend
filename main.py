@@ -1,9 +1,9 @@
 import os
 import json
 import asyncio
-import aiosqlite
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
+from supabase import create_client, Client
 from pydantic import BaseModel
 from typing import Dict, Any, List
 
@@ -22,7 +22,10 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-DB_FILE = os.path.join(os.path.dirname(__file__), "pil_identities.db")
+SUPABASE_URL = os.getenv("SUPABASE_URL", "")
+SUPABASE_KEY = os.getenv("SUPABASE_KEY", "")
+supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
+
 CIRCUITS_DIR = os.path.join(os.path.dirname(__file__), "circuits")
 
 class IdentityResponse(BaseModel):
@@ -32,16 +35,6 @@ class IdentityResponse(BaseModel):
 class VerifyRequest(BaseModel):
     proof: Dict[str, Any]
     public_signals: List[str]
-
-@app.on_event("startup")
-async def startup_db():
-    async with aiosqlite.connect(DB_FILE) as db:
-        await db.execute('''
-            CREATE TABLE IF NOT EXISTS identities (
-                public_hash TEXT PRIMARY KEY
-            )
-        ''')
-        await db.commit()
 
 @app.post("/generate-identity", response_model=IdentityResponse)
 async def generate_identity():
@@ -65,9 +58,10 @@ async def generate_identity():
 
     public_hash = data.get("public_hash")
     
-    async with aiosqlite.connect(DB_FILE) as db:
-        await db.execute("INSERT OR IGNORE INTO identities (public_hash) VALUES (?)", (public_hash,))
-        await db.commit()
+    try:
+        supabase.table("identities").insert({"public_hash": public_hash}).execute()
+    except Exception:
+        pass
         
     return data
 
@@ -78,11 +72,9 @@ async def verify_identity(req: VerifyRequest):
         
     public_hash = req.public_signals[0]
     
-    async with aiosqlite.connect(DB_FILE) as db:
-        async with db.execute("SELECT 1 FROM identities WHERE public_hash = ?", (public_hash,)) as cursor:
-            row = await cursor.fetchone()
-            if not row:
-                raise HTTPException(status_code=404, detail="Identity not found in database")
+    response = supabase.table("identities").select("*").eq("public_hash", public_hash).execute()
+    if not response.data or len(response.data) == 0:
+        raise HTTPException(status_code=404, detail="Identity not found in database")
                 
     script_path = os.path.join(CIRCUITS_DIR, "verify.js")
     proof_str = json.dumps(req.proof)

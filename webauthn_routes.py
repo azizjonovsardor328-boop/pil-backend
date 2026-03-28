@@ -14,10 +14,10 @@ from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel
 from urllib.parse import urlparse
 
-router = APIRouter(prefix="/webauthn", tags=["WebAuthn"])
+# Import supabase client from main
+from main import supabase
 
-# In-memory credential store (production: use database)
-CREDENTIAL_STORE: Dict[str, Any] = {}
+router = APIRouter(prefix="/webauthn", tags=["WebAuthn"])
 
 RP_ID = os.getenv("PIL_RP_ID", "frontend-cb7owtw7f-sardors-projects-576ea55f.vercel.app")
 RP_NAME = "PIL Sovereign Identity Protocol"
@@ -64,8 +64,15 @@ async def register_start(req: RegisterStartRequest, request: Request):
     user_id = hashlib.sha256(req.username.encode()).hexdigest()[:32]
     user_id_b64 = base64.urlsafe_b64encode(user_id.encode()).decode("ascii").rstrip("=")
 
-    # Store challenge for verification
-    CREDENTIAL_STORE[f"challenge:{req.username}"] = challenge_b64
+    # Store challenge for verification in Supabase
+    try:
+        supabase.table("webauthn_challenges").upsert({
+            "username": req.username,
+            "challenge_type": "register",
+            "challenge_b64": challenge_b64
+        }).execute()
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
 
     options = {
         "challenge": challenge_b64,
@@ -100,19 +107,23 @@ async def register_finish(req: RegisterFinishRequest):
     Step 2: Client sends the credential back. Server stores it.
     This binds the user's biometric (FaceID/fingerprint) to their PIL identity.
     """
-    stored_challenge = CREDENTIAL_STORE.get(f"challenge:{req.username}")
-    if not stored_challenge:
+    res = supabase.table("webauthn_challenges").select("*").eq("username", req.username).eq("challenge_type", "register").execute()
+    if not res.data:
         raise HTTPException(status_code=400, detail="No pending challenge")
 
-    # Store the credential
-    CREDENTIAL_STORE[f"cred:{req.username}"] = {
-        "credential_id": req.credential_id,
-        "public_key": req.public_key,
-        "attestation": req.attestation,
-    }
-
-    # Clean up challenge
-    del CREDENTIAL_STORE[f"challenge:{req.username}"]
+    # Store the credential in Supabase
+    try:
+        supabase.table("webauthn_credentials").upsert({
+            "username": req.username,
+            "credential_id": req.credential_id,
+            "public_key": req.public_key,
+            "attestation": req.attestation
+        }).execute()
+        
+        # Clean up challenge
+        supabase.table("webauthn_challenges").delete().eq("username", req.username).eq("challenge_type", "register").execute()
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
 
     return {
         "status": "ok",
@@ -132,14 +143,22 @@ async def auth_start(req: AuthStartRequest, request: Request):
     origin = request.headers.get("origin")
     current_rp_id = urlparse(origin).hostname if origin else RP_ID
 
-    cred = CREDENTIAL_STORE.get(f"cred:{req.username}")
-    if not cred:
-        raise HTTPException(status_code=404, detail="No credential found for this user")
+    res = supabase.table("webauthn_credentials").select("*").eq("username", req.username).execute()
+    if not res.data:
+        raise HTTPException(status_code=404, detail="No credential found for this user. Please Register Biometrics first.")
+    cred = res.data[0]
 
     challenge = secrets.token_bytes(32)
     challenge_b64 = base64.urlsafe_b64encode(challenge).decode("ascii").rstrip("=")
 
-    CREDENTIAL_STORE[f"auth_challenge:{req.username}"] = challenge_b64
+    try:
+        supabase.table("webauthn_challenges").upsert({
+            "username": req.username,
+            "challenge_type": "auth",
+            "challenge_b64": challenge_b64
+        }).execute()
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
 
     options = {
         "challenge": challenge_b64,
@@ -164,20 +183,21 @@ async def auth_finish(req: AuthFinishRequest):
     If valid, generate a PIL identity (secret_key + public_hash) tied to this credential.
     This replaces the random generation with real biometric-backed identity.
     """
-    cred = CREDENTIAL_STORE.get(f"cred:{req.username}")
-    if not cred:
+    cred_res = supabase.table("webauthn_credentials").select("*").eq("username", req.username).execute()
+    if not cred_res.data:
         raise HTTPException(status_code=404, detail="No credential found")
+    cred = cred_res.data[0]
 
-    stored_challenge = CREDENTIAL_STORE.get(f"auth_challenge:{req.username}")
-    if not stored_challenge:
+    chal_res = supabase.table("webauthn_challenges").select("*").eq("username", req.username).eq("challenge_type", "auth").execute()
+    if not chal_res.data:
         raise HTTPException(status_code=400, detail="No pending auth challenge")
 
     # Verify credential_id matches
     if req.credential_id != cred["credential_id"]:
         raise HTTPException(status_code=401, detail="Credential mismatch")
 
-    # Clean up
-    del CREDENTIAL_STORE[f"auth_challenge:{req.username}"]
+    # Clean up auth challenge
+    supabase.table("webauthn_challenges").delete().eq("username", req.username).eq("challenge_type", "auth").execute()
 
     # Generate PIL identity derived from biometric credential
     # The secret_key is derived from the credential, not random
